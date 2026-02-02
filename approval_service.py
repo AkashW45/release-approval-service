@@ -1,22 +1,36 @@
 from flask import Flask, request, jsonify
 import requests, os, uuid
 from datetime import datetime
+import sqlite3
 
 app = Flask(__name__)
 
 # ===============================
 # ENV CONFIG (RENDER)
 # ===============================
-RUNDECK_URL = os.getenv("RUNDECK_URL")
-RUNDECK_API_TOKEN = os.getenv("RUNDECK_API_TOKEN")
+RUNDECK_URL = os.getenv("RUNDECK_URL", "").strip()
+RUNDECK_API_TOKEN = os.getenv("RUNDECK_API_TOKEN", "").strip()
 
 if not RUNDECK_URL or not RUNDECK_API_TOKEN:
     raise RuntimeError("RUNDECK_URL or RUNDECK_API_TOKEN not set")
 
 # ===============================
-# IN-MEMORY STORE (POC)
+# SQLITE STORE (REPLACES MEMORY)
 # ===============================
-APPROVALS = {}
+conn = sqlite3.connect("approvals.db", check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS approvals (
+    approval_id TEXT PRIMARY KEY,
+    execution_id TEXT,
+    release_id TEXT,
+    ai_decision TEXT,
+    status TEXT,
+    created_at TEXT
+)
+""")
+conn.commit()
 
 # -------------------------------
 # HEALTH
@@ -34,13 +48,18 @@ def request_approval():
 
     approval_id = f"appr_{uuid.uuid4().hex[:12]}"
 
-    APPROVALS[approval_id] = {
-        "execution_id": data["execution_id"],
-        "release_id": data["release_id"],
-        "ai_decision": data["ai_decision"],
-        "status": "PENDING",
-        "created_at": datetime.utcnow().isoformat()
-    }
+    cur.execute(
+        "INSERT INTO approvals VALUES (?,?,?,?,?,?)",
+        (
+            approval_id,
+            data["execution_id"],
+            data["release_id"],
+            data["ai_decision"],
+            "PENDING",
+            datetime.utcnow().isoformat()
+        )
+    )
+    conn.commit()
 
     approval_url = f"{request.host_url.rstrip('/')}/approval/{approval_id}"
 
@@ -54,17 +73,19 @@ def request_approval():
 # -------------------------------
 @app.route("/approval/<approval_id>")
 def approval_page(approval_id):
-    a = APPROVALS.get(approval_id)
-    if not a:
+    cur.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,))
+    row = cur.fetchone()
+
+    if not row:
         return "Invalid approval ID", 404
 
-    if a["status"] != "PENDING":
-        return f"Already decided: {a['status']}"
+    if row[4] != "PENDING":
+        return f"Already decided: {row[4]}"
 
     return f"""
     <h2>🚨 Release Approval Required</h2>
-    <p><b>Release:</b> {a['release_id']}</p>
-    <p><b>AI Recommendation:</b> {a['ai_decision']}</p>
+    <p><b>Release:</b> {row[2]}</p>
+    <p><b>AI Recommendation:</b> {row[3]}</p>
 
     <a href="/decision/{approval_id}/CONTINUE"><button>CONTINUE</button></a><br><br>
     <a href="/decision/{approval_id}/PAUSE"><button>PAUSE</button></a><br><br>
@@ -76,15 +97,17 @@ def approval_page(approval_id):
 # -------------------------------
 @app.route("/decision/<approval_id>/<decision>")
 def decision(approval_id, decision):
-    a = APPROVALS.get(approval_id)
-    if not a:
+    cur.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,))
+    row = cur.fetchone()
+
+    if not row:
         return "Invalid approval ID", 404
 
-    if a["status"] != "PENDING":
-        return f"Already decided: {a['status']}"
+    if row[4] != "PENDING":
+        return f"Already decided: {row[4]}"
 
     decision = decision.upper()
-    exec_id = a["execution_id"]
+    exec_id = row[1]
 
     headers = {
         "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
@@ -98,7 +121,6 @@ def decision(approval_id, decision):
             timeout=10
         )
         r.raise_for_status()
-        a["status"] = "CONTINUE"
 
     elif decision == "ROLLBACK":
         r = requests.post(
@@ -107,14 +129,18 @@ def decision(approval_id, decision):
             timeout=10
         )
         r.raise_for_status()
-        a["status"] = "ROLLBACK"
 
     elif decision == "PAUSE":
-        a["status"] = "PAUSE"
-        return "Execution remains paused."
+        pass
 
     else:
         return "Invalid decision", 400
+
+    cur.execute(
+        "UPDATE approvals SET status=? WHERE approval_id=?",
+        (decision, approval_id)
+    )
+    conn.commit()
 
     return f"Decision applied: {decision}"
 
