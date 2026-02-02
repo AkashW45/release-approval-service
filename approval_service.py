@@ -110,9 +110,11 @@ def decision(approval_id, decision):
     exec_id = row[1]
 
     headers = {
-        "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
-        "Content-Type": "application/json"
+    "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
+    "Content-Type": "application/json",
+    "ngrok-skip-browser-warning": "true"
     }
+
 
     if decision == "CONTINUE":
         r = requests.post(
