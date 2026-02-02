@@ -1,60 +1,27 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify
+import requests, os, uuid
 from datetime import datetime
-import uuid
-import requests
-import os
 
 app = Flask(__name__)
 
-# =========================================================
-# CONFIG (ENV VARS)
-# =========================================================
-
-RUNDECK_URL = os.getenv("RUNDECK_URL", "http://127.0.0.1:4440")
+RUNDECK_URL = os.getenv("http://<rundeck-host>:4440")
 RUNDECK_API_TOKEN = os.getenv("CmUiZAfqVq5fLfGee2oOuznsYEnmuJhS")
-
-# =========================================================
-# IN-MEMORY STORE (POC OK)
-# =========================================================
 
 APPROVALS = {}
 
-# =========================================================
-# RUNDECK ACTIONS
-# =========================================================
-
-def rundeck_resume(execution_id):
-    requests.post(
-        f"{RUNDECK_URL}/api/41/execution/{execution_id}/resume",
-        headers={"X-Rundeck-Auth-Token": RUNDECK_API_TOKEN},
-        timeout=5
-    )
-
-def rundeck_abort(execution_id):
-    requests.post(
-        f"{RUNDECK_URL}/api/41/execution/{execution_id}/abort",
-        headers={"X-Rundeck-Auth-Token": RUNDECK_API_TOKEN},
-        timeout=5
-    )
-
-# =========================================================
-# ROUTES
-# =========================================================
-
+# -------------------------------
+# HEALTH
+# -------------------------------
 @app.route("/")
 def health():
     return "Approval Service running"
 
-# ---------------------------------------------------------
-# CREATE APPROVAL (CALLED BY RUNDECK)
-# ---------------------------------------------------------
+# -------------------------------
+# CREATE APPROVAL (called by Rundeck)
+# -------------------------------
 @app.route("/request-approval", methods=["POST"])
 def request_approval():
     data = request.json
-
-    for k in ["execution_id", "release_id", "ai_decision"]:
-        if k not in data:
-            return jsonify({"error": f"Missing {k}"}), 400
 
     approval_id = f"appr_{uuid.uuid4().hex[:12]}"
 
@@ -66,73 +33,77 @@ def request_approval():
         "created_at": datetime.utcnow().isoformat()
     }
 
-    base = request.host_url.rstrip("/")
+    approval_url = f"{request.host_url.rstrip('/')}/approval/{approval_id}"
+
     return jsonify({
         "approval_id": approval_id,
-        "approval_url": f"{base}/approval/{approval_id}"
+        "approval_url": approval_url
     })
 
-# ---------------------------------------------------------
-# APPROVAL PAGE (HUMAN UI)
-# ---------------------------------------------------------
+# -------------------------------
+# APPROVAL PAGE (UI)
+# -------------------------------
 @app.route("/approval/<approval_id>")
 def approval_page(approval_id):
-    approval = APPROVALS.get(approval_id)
-    if not approval:
+    a = APPROVALS.get(approval_id)
+    if not a:
         return "Invalid approval ID", 404
 
-    if approval["status"] != "PENDING":
-        return f"Already decided: {approval['status']}"
+    if a["status"] != "PENDING":
+        return f"Already decided: {a['status']}"
 
-    return render_template_string("""
-        <h2>🚨 Release Approval Required</h2>
-        <p><b>Release:</b> {{ release }}</p>
-        <p><b>AI Recommendation:</b> {{ ai }}</p>
+    return f"""
+    <h2>🚨 Release Approval Required</h2>
+    <p><b>Release:</b> {a['release_id']}</p>
+    <p><b>AI Recommendation:</b> {a['ai_decision']}</p>
 
-        <form method="post" action="/decision/{{ id }}/CONTINUE">
-            <button style="padding:10px;">✅ CONTINUE</button>
-        </form>
+    <a href="/decision/{approval_id}/CONTINUE"><button>CONTINUE</button></a><br><br>
+    <a href="/decision/{approval_id}/PAUSE"><button>PAUSE</button></a><br><br>
+    <a href="/decision/{approval_id}/ROLLBACK"><button>ROLLBACK</button></a>
+    """
 
-        <form method="post" action="/decision/{{ id }}/PAUSE">
-            <button style="padding:10px;">⏸️ PAUSE</button>
-        </form>
-
-        <form method="post" action="/decision/{{ id }}/ROLLBACK">
-            <button style="padding:10px;">🔁 ROLLBACK</button>
-        </form>
-    """, id=approval_id, release=approval["release_id"], ai=approval["ai_decision"])
-
-# ---------------------------------------------------------
-# HANDLE DECISION
-# ---------------------------------------------------------
-@app.route("/decision/<approval_id>/<decision>", methods=["POST"])
-def decide(approval_id, decision):
-    approval = APPROVALS.get(approval_id)
-    if not approval:
+# -------------------------------
+# DECISION HANDLER (THIS WAS BROKEN)
+# -------------------------------
+@app.route("/decision/<approval_id>/<decision>")
+def decision(approval_id, decision):
+    a = APPROVALS.get(approval_id)
+    if not a:
         return "Invalid approval ID", 404
 
-    if approval["status"] != "PENDING":
-        return f"Already decided: {approval['status']}"
+    if a["status"] != "PENDING":
+        return f"Already decided: {a['status']}"
 
-    approval["status"] = decision
-    approval["decided_at"] = datetime.utcnow().isoformat()
+    decision = decision.upper()
+    exec_id = a["execution_id"]
+
+    headers = {"X-Rundeck-Auth-Token": RUNDECK_API_TOKEN}
 
     if decision == "CONTINUE":
-        rundeck_resume(approval["execution_id"])
-        return "✅ CONTINUE selected. Rundeck resumed."
+        requests.post(
+            f"{RUNDECK_URL}/api/41/execution/{exec_id}/resume",
+            headers=headers,
+            timeout=5
+        )
+        a["status"] = "CONTINUE"
 
-    if decision == "ROLLBACK":
-        rundeck_abort(approval["execution_id"])
-        return "🔁 ROLLBACK selected. Rundeck aborted."
+    elif decision == "ROLLBACK":
+        requests.post(
+            f"{RUNDECK_URL}/api/41/execution/{exec_id}/abort",
+            headers=headers,
+            timeout=5
+        )
+        a["status"] = "ROLLBACK"
 
-    if decision == "PAUSE":
-        return "⏸️ PAUSE selected. Rundeck remains halted."
+    elif decision == "PAUSE":
+        a["status"] = "PAUSE"
+        return "Execution remains paused."
 
-    return "Invalid decision", 400
+    else:
+        return "Invalid decision", 400
 
-# =========================================================
-# START
-# =========================================================
+    return f"Decision applied: {decision}"
 
+# -------------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
