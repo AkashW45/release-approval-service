@@ -110,12 +110,21 @@ def decision(approval_id, decision):
     exec_id = row[1]
 
     headers = {
-    "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
-    "Content-Type": "application/json",
-    "ngrok-skip-browser-warning": "true"
+        "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true"
     }
 
+    # ===============================
+    # 🔑 WRITE DECISION FOR RUNDECK
+    # ===============================
+    decision_file = f"/tmp/approval_decision_{exec_id}.txt"
+    with open(decision_file, "w") as f:
+        f.write(decision)
 
+    # ===============================
+    # RUNDECK CONTROL (already working)
+    # ===============================
     if decision == "CONTINUE":
         r = requests.post(
             f"{RUNDECK_URL}/api/41/execution/{exec_id}/resume",
@@ -133,7 +142,7 @@ def decision(approval_id, decision):
         r.raise_for_status()
 
     elif decision == "PAUSE":
-        pass
+        pass  # remain paused
 
     else:
         return "Invalid decision", 400
@@ -145,6 +154,7 @@ def decision(approval_id, decision):
     conn.commit()
 
     return f"Decision applied: {decision}"
+
 
 # -------------------------------
 if __name__ == "__main__":
