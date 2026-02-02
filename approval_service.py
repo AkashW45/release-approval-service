@@ -4,9 +4,18 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-RUNDECK_URL = os.getenv("http://<rundeck-host>:4440")
-RUNDECK_API_TOKEN = os.getenv("CmUiZAfqVq5fLfGee2oOuznsYEnmuJhS")
+# ===============================
+# ENV CONFIG (RENDER)
+# ===============================
+RUNDECK_URL = os.getenv("RUNDECK_URL")
+RUNDECK_API_TOKEN = os.getenv("RUNDECK_API_TOKEN")
 
+if not RUNDECK_URL or not RUNDECK_API_TOKEN:
+    raise RuntimeError("RUNDECK_URL or RUNDECK_API_TOKEN not set")
+
+# ===============================
+# IN-MEMORY STORE (POC)
+# ===============================
 APPROVALS = {}
 
 # -------------------------------
@@ -17,7 +26,7 @@ def health():
     return "Approval Service running"
 
 # -------------------------------
-# CREATE APPROVAL (called by Rundeck)
+# CREATE APPROVAL (CALLED BY RUNDECK)
 # -------------------------------
 @app.route("/request-approval", methods=["POST"])
 def request_approval():
@@ -63,7 +72,7 @@ def approval_page(approval_id):
     """
 
 # -------------------------------
-# DECISION HANDLER (THIS WAS BROKEN)
+# DECISION HANDLER
 # -------------------------------
 @app.route("/decision/<approval_id>/<decision>")
 def decision(approval_id, decision):
@@ -77,22 +86,27 @@ def decision(approval_id, decision):
     decision = decision.upper()
     exec_id = a["execution_id"]
 
-    headers = {"X-Rundeck-Auth-Token": RUNDECK_API_TOKEN}
+    headers = {
+        "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
+        "Content-Type": "application/json"
+    }
 
     if decision == "CONTINUE":
-        requests.post(
+        r = requests.post(
             f"{RUNDECK_URL}/api/41/execution/{exec_id}/resume",
             headers=headers,
-            timeout=5
+            timeout=10
         )
+        r.raise_for_status()
         a["status"] = "CONTINUE"
 
     elif decision == "ROLLBACK":
-        requests.post(
+        r = requests.post(
             f"{RUNDECK_URL}/api/41/execution/{exec_id}/abort",
             headers=headers,
-            timeout=5
+            timeout=10
         )
+        r.raise_for_status()
         a["status"] = "ROLLBACK"
 
     elif decision == "PAUSE":
