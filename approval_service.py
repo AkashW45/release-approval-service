@@ -93,6 +93,21 @@ def approval_page(approval_id):
     """
 
 # -------------------------------
+# APPROVAL STATUS (POLLED BY RUNDECK)
+# -------------------------------
+@app.route("/status/<approval_id>")
+def approval_status(approval_id):
+    cur.execute("SELECT status FROM approvals WHERE approval_id=?", (approval_id,))
+    row = cur.fetchone()
+
+    if not row:
+        return jsonify({"status": "UNKNOWN"}), 404
+
+    return jsonify({
+        "status": row[0]
+    })
+
+# -------------------------------
 # DECISION HANDLER
 # -------------------------------
 @app.route("/decision/<approval_id>/<decision>")
@@ -111,38 +126,25 @@ def decision(approval_id, decision):
 
     headers = {
         "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
-        "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true"
+        "Content-Type": "application/json"
     }
 
-    # ===============================
-    # 🔑 WRITE DECISION FOR RUNDECK
-    # ===============================
-    decision_file = f"/tmp/approval_decision_{exec_id}.txt"
-    with open(decision_file, "w") as f:
-        f.write(decision)
-
-    # ===============================
-    # RUNDECK CONTROL (already working)
-    # ===============================
     if decision == "CONTINUE":
-        r = requests.post(
+        requests.post(
             f"{RUNDECK_URL}/api/41/execution/{exec_id}/resume",
             headers=headers,
             timeout=10
-        )
-        r.raise_for_status()
+        ).raise_for_status()
 
     elif decision == "ROLLBACK":
-        r = requests.post(
+        requests.post(
             f"{RUNDECK_URL}/api/41/execution/{exec_id}/abort",
             headers=headers,
             timeout=10
-        )
-        r.raise_for_status()
+        ).raise_for_status()
 
     elif decision == "PAUSE":
-        pass  # remain paused
+        pass
 
     else:
         return "Invalid decision", 400
@@ -154,6 +156,7 @@ def decision(approval_id, decision):
     conn.commit()
 
     return f"Decision applied: {decision}"
+
 
 
 # -------------------------------
