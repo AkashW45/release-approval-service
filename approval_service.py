@@ -10,15 +10,8 @@ app = Flask(__name__)
 # ===============================
 # ENV CONFIG
 # ===============================
-RUNDECK_URL = os.getenv("RUNDECK_URL", "").strip()
-RUNDECK_API_TOKEN = os.getenv("RUNDECK_API_TOKEN", "").strip()
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not RUNDECK_URL or not RUNDECK_API_TOKEN:
-    raise RuntimeError("RUNDECK_URL or RUNDECK_API_TOKEN not set")
-
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL not set")
+DIFY_CALLBACK_URL = os.getenv("DIFY_CALLBACK_URL")  # Workflow 2 webhook
 
 # ===============================
 # POSTGRES CONNECTION
@@ -39,7 +32,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 """)
 
 # ===============================
-# HEALTH
+# HEALTH CHECK
 # ===============================
 @app.route("/")
 def health():
@@ -51,6 +44,7 @@ def health():
 @app.route("/request-approval", methods=["POST"])
 def request_approval():
     data = request.json
+
     approval_id = f"appr_{uuid.uuid4().hex[:12]}"
 
     cur.execute("""
@@ -61,9 +55,9 @@ def request_approval():
         VALUES (%s, %s, %s, %s, %s, %s)
     """, (
         approval_id,
-        data["execution_id"],
-        data["release_id"],
-        data["ai_decision"],
+        data.get("execution_id"),
+        data.get("release_id"),
+        data.get("ai_decision"),
         "PENDING",
         datetime.utcnow()
     ))
@@ -95,15 +89,20 @@ def approval_page(approval_id):
     return f"""
     <h2>🚨 Release Approval Required</h2>
     <p><b>Release:</b> {row['release_id']}</p>
-    <p><b>AI Recommendation:</b> {row['ai_decision']}</p>
+    <p><b>AI Recommendation:</b></p>
+    <pre>{row['ai_decision']}</pre>
 
-    <a href="/decision/{approval_id}/CONTINUE"><button>CONTINUE</button></a><br><br>
-    <a href="/decision/{approval_id}/PAUSE"><button>PAUSE</button></a><br><br>
-    <a href="/decision/{approval_id}/ROLLBACK"><button>ROLLBACK</button></a>
+    <a href="/decision/{approval_id}/CONTINUE">
+        <button style="background:green;color:white;padding:10px;">CONTINUE</button>
+    </a><br><br>
+
+    <a href="/decision/{approval_id}/ROLLBACK">
+        <button style="background:red;color:white;padding:10px;">ROLLBACK</button>
+    </a>
     """
 
 # ===============================
-# STATUS (POLLED BY RUNDECK)
+# STATUS CHECK (Optional)
 # ===============================
 @app.route("/status/<approval_id>")
 def approval_status(approval_id):
@@ -136,37 +135,30 @@ def decision(approval_id, decision):
         return f"Already decided: {row['status']}"
 
     decision = decision.upper()
-    exec_id = row["execution_id"]
 
-    headers = {
-        "X-Rundeck-Auth-Token": RUNDECK_API_TOKEN,
-        "Content-Type": "application/json"
-    }
-
-    if decision == "CONTINUE":
-        requests.post(
-            f"{RUNDECK_URL}/api/41/execution/{exec_id}/resume",
-            headers=headers,
-            timeout=10
-        ).raise_for_status()
-
-    elif decision == "ROLLBACK":
-        requests.post(
-            f"{RUNDECK_URL}/api/41/execution/{exec_id}/abort",
-            headers=headers,
-            timeout=10
-        ).raise_for_status()
-
-    elif decision == "PAUSE":
-        pass
-
-    else:
+    if decision not in ["CONTINUE", "ROLLBACK"]:
         return "Invalid decision", 400
 
+    # Update status
     cur.execute(
         "UPDATE approvals SET status = %s WHERE approval_id = %s",
         (decision, approval_id)
     )
+
+    # Trigger Dify Workflow 2
+    try:
+        requests.post(
+            DIFY_CALLBACK_URL,
+            json={
+                "approval_id": approval_id,
+                "status": decision,
+                "release_id": row["release_id"],
+                "execution_id": row["execution_id"]
+            },
+            timeout=10
+        )
+    except Exception as e:
+        return f"Decision saved but callback failed: {str(e)}", 500
 
     return f"Decision applied: {decision}"
 
